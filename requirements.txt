@@ -1,0 +1,5 @@
+# Python 3.8 (robomaster SDK supports 3.6 - 3.8)
+robomaster; platform_system != "Darwin"   # DJI SDK: wheels only for Windows / Linux x86_64
+opencv-python==4.10.0.84                  # 4.11+ macOS wheels bundle SDL2 -> clashes with pygame
+numpy
+pygame                                    # control panel (panel.py)

@@ -103,14 +103,22 @@ A_MAX = 0.8                 # m/s^2
 V_MIN = 0.06                # m/s  creep speed near goal
 POS_TOL = 0.015             # m    arrival tolerance
 MOTION_LAG = 0.08           # s    command -> wheel delay; braking starts this early  # CAL
-LAT_KP = 3.0                # 1/s  lateral centring gain (pose fallback, no side walls)
+LAT_KP = 3.0                # 1/s  lateral centring gain (pose fallback: no side wall seen)
 LAT_VMAX = 0.30             # m/s
 # Centring on the walls (Dhai_8 wall PID): distances from the robot centre
 SIDE_NOMINAL = 0.30         # m, wall distance when centred in a 0.60 m cell
 SIDE_WALL_MAX = 0.42        # m, a side reading closer than this = a wall to centre on
 WALL_KP = 1.5               # 1/s  sideways speed per metre of centring error
+WALL_KI = 0.8               # 1/s^2  integral: cancels a steady sideways slide of the wheels
+WALL_I_MAX = 0.04           # m*s  integral clamp
+WALL_ERR_MAX = 0.05         # m  side reading further off nominal is unused (plate / fold-back)
+WALL_POSE_TOL = 0.03        # m  ... unless the pose predicts it within this
+WALL_POSE_GATE = 0.08       # m  ... and never when the pose says something this different
 WALL_VMAX = 0.10            # m/s
-WALL_DEADBAND = 0.015       # m
+WALL_DEADBAND = 0.015       # m  (Dhai_8: 2 cm)
+ALIGN_TIME = 0.4            # s  Dhai_8 align_at_cell_center after each grid step
+RECENTER_TOL = 0.03         # m  off the cell centre by more: centre before turning / driving
+FRONT_ANCHOR_MAX = 0.20     # m  largest pose jump from a front-wall ToF stop
 TOO_CLOSE = 0.20            # m from the centre (~8 cm from the chassis side): push away
 IR_STEER = 0.08             # m/s sideways away from a front-corner IR that is on
 IR_SLOW = 0.5               # forward speed share while a corner IR is on

@@ -79,6 +79,8 @@ class SimHAL:
         self.sharp_err = {}                     # simulated calibration error per side (m)
         self.turn_slip = 0.0                    # odometry error per degree turned (m)
         self.sharp_glitch = 0.0                 # chance a Sharp reading comes out 9 cm long
+        self.sharp_dead = set()                 # sides whose Sharp always reads "far"
+        self.slide = 0.0                        # unseen sideways drift (share of forward speed, + = left)
         self.sharp_bias = {s: 0.0 for s in C.SHARP}
         self.hits = []
         self.collisions = set()
@@ -120,10 +122,13 @@ class SimHAL:
         r = math.radians(self.yaw)
         vn = vx * math.cos(r) - vy * math.sin(r)
         ve = vx * math.sin(r) + vy * math.cos(r)
-        nx, ny = self.x + ve * h, self.y + vn * h
-        nx, ny = self._collide(nx, ny)
         self.odo[0] += vn * h * self.odo_scale
         self.odo[1] += ve * h * self.odo_scale
+        if self.slide:                          # mecanum rollers slide; the encoders miss it
+            sl = self.slide * abs(vx)
+            vn, ve = vn + sl * math.sin(r), ve - sl * math.cos(r)
+        nx, ny = self.x + ve * h, self.y + vn * h
+        nx, ny = self._collide(nx, ny)
         if self.turn_slip and abs(wz) > 5:      # wheels slip while turning in place
             self.odo[0] += self.rnd.gauss(0, self.turn_slip * abs(wz) * h)
             self.odo[1] += self.rnd.gauss(0, self.turn_slip * abs(wz) * h)
@@ -182,6 +187,9 @@ class SimHAL:
         if h is not None:
             for side in C.SHARP:
                 d = side_dir(h, side)
+                if side in self.sharp_dead:
+                    out[d] = (None, "sharp")
+                    continue
                 r = self._raw_range(d) + self.rnd.gauss(0, 0.006) + self.sharp_err.get(side, 0.0)
                 if self.sharp_glitch and self.rnd.random() < self.sharp_glitch:
                     r += 0.09                       # a long reading (panel gap / fold-back)
@@ -202,6 +210,8 @@ class SimHAL:
         out = {}
         h = self.heading() or "N"
         for side in C.SHARP:
+            if side in self.sharp_dead:
+                continue
             r = self._raw_range(side_dir(h, side)) + self.sharp_err.get(side, 0.0)
             if r - C.SHARP_OFFSET[side] > C.SHARP_MAX or r > C.SIDE_WALL_MAX:
                 continue

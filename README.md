@@ -18,11 +18,24 @@ This follows robomaster-assignment2-4x4_Dhai_8.
   the IMU yaw. If the error grows, the turn-command sign is flipped once. The
   robot always drives forward, so the gimbal ToF and the two front-corner IR
   modules guard the way ahead, and the side Sharps keep it centred.
-* **Drive exactly one cell and stop on its centre.** Heading is held, and the
-  Sharps pull the robot back to the middle between the walls. The ToF ahead
-  and the wall-snap localisation place the stop. The robot stands still
-  briefly before the next step. Set `GRID_STEP = False` in `config.py` to
-  drive straight corridors in one run instead.
+* **Drive exactly one cell and stop on its centre.** Heading is held.
+  Sideways, Dhai_8's wall-centring PID steers straight from the side Sharps:
+  both walls → (R − L)/2, one wall → its distance against `SIDE_NOMINAL`, no
+  wall → the pose. The pose's sideways axis is re-anchored to what the walls
+  say, because odometry counts the centring strafe as real motion. A side
+  reading is not used when:
+  * it is more than 5 cm off nominal, since an unseen target plate reads short
+    and a Sharp closer than 4 cm folds back and reads long;
+  * it is 8 cm off what the pose predicts;
+  * that side's corner IR is on.
+
+  The stop comes from the pose, or from the gimbal ToF if the wall ahead is
+  nearer (Dhai_8's front-wall stop), and the pose is re-anchored there too.
+  After each step, `align` centres on the side walls in place, then the robot
+  stands still briefly. If a shooting back-off left the robot off-centre, it
+  re-centres before the next turn. Every step prints a `[step]` line to the log.
+  Set `GRID_STEP = False` in `config.py` to drive straight corridors in one run
+  instead.
 * **Gimbal: relative move actions of at most 90°.** Each move is planned from
   the commanded position and never corrected from the angle feed, then the
   gimbal settles for 0.25 s. This avoids the "snake" shaking that a speed loop

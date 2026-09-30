@@ -1,0 +1,82 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Panel - simulator",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/panel.py",
+            "args": [
+                "--sim",
+                "--connect",
+                "--seed",
+                "3",
+                "--speed",
+                "2"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Panel - Connect screen",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/panel.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Robot connection check (Wi-Fi AP)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/tools/macos/check_robomaster.py",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Round 1 - simulator (CLI)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--sim",
+                "--round",
+                "1",
+                "--seed",
+                "3"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Round 2 - simulator (CLI)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--sim",
+                "--round",
+                "2",
+                "--seed",
+                "3"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Sensor selftest (robot)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--selftest"
+            ],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Vision test (robot)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+                "--vision-test"
+            ],
+            "console": "integratedTerminal"
+        }
+    ]
+}

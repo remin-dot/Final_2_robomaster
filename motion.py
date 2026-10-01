@@ -1,10 +1,11 @@
 """Grid-snapped localisation + grid-by-grid motion (Dhai_8 style).
 
 Motion: the chassis turns in place to face the next cell, drives FORWARD one
-cell (heading held, centred between the walls by the side Sharps, stopped on
-the cell centre by odometry / the front ToF) and stands still before the next
-step.  While turning and driving the gimbal faces forward in chassis-lead mode;
-scans run in free mode.
+cell (heading held, centred between the walls by the side Sharps - Dhai_8's
+WallCenteringPID cases - stopped on the cell centre by odometry or the front
+ToF, whichever says nearer), aligns on the side walls and stands still before
+the next step.  While turning and driving the gimbal faces forward in
+chassis-lead mode; scans run in free mode.
 
 Pose = wheel odometry (world frame of the start) + an offset.  Walls only exist
 on tile boundaries, so any range reading that lands near a boundary tells us
@@ -14,7 +15,7 @@ import math
 import threading
 
 import config as C
-from maze import OPEN, step
+from maze import DV, OPEN, step
 from hal import YAW_OF_DIR, chassis_dir, wrap
 
 T = C.TILE
@@ -44,6 +45,7 @@ class Motion:
         self.trace = []
         self._last_trace = -1.0
         self.heading = chassis_dir(hal.odom()[2]) or "N"     # way the chassis faces
+        self._wi = 0.0                                      # wall PI integral
 
     # ------------------------------------------------------------ pose ----
     def pose(self):
@@ -114,6 +116,17 @@ class Motion:
                 self.off_n += corr
             else:
                 self.off_e += corr
+
+    def place_axis(self, d, r):
+        """The wall on side d of this cell is r m from the robot centre (gimbal
+        ToF): put the pose there on that axis (start-of-round calibration)."""
+        c = self.cell()
+        x, y, _ = self.pose()
+        s = SIGN[d]
+        if d in "NS":
+            self.off_n += c[1] * T + s * (T / 2 - r) - y
+        else:
+            self.off_e += c[0] * T + s * (T / 2 - r) - x
 
     def _trace(self):
         t = self.hal.now()
@@ -197,6 +210,10 @@ class Motion:
     def run_segment(self, d, n):
         """Face d, then drive n cells forward - one cell at a time when GRID_STEP.
         Returns the cell reached (early if blocked)."""
+        x, y, _ = self.pose()
+        c = self.cell()
+        if max(abs(c[0] * T - x), abs(c[1] * T - y)) > C.RECENTER_TOL:
+            self.center_in_cell()                   # e.g. after a shooting back-off
         self.turn_to(d)
         self.hal.gimbal_front()
         self.hal.set_mode("chassis_lead")          # the gimbal (ToF) stays facing forward
@@ -225,11 +242,21 @@ class Motion:
         v = 0.0
         t_end = hal.now() + C.SEG_TIMEOUT * n + 1.0
         nxt = hal.now()
+        self._wi = 0.0
+        cases = set()
+        tof_stop = False
+        # Dhai_8 front-wall stop: the gimbal ToF (facing forward) gives the distance
+        # to the wall ahead of the goal cell; a known plate there stands closer
+        stop_at = C.SIDE_NOMINAL - (C.TARGET_WALL_GAP if (goal, d) in self.ignore else 0.0)
         while True:
             self.localize(axis, abs(v))
             x, y, yaw = self.pose()
             along = s * ((gy - y) if ns else (gx - x))
             lat = (gx - x) if ns else (gy - y)
+            fr, kind = hal.ranges_ex().get(d, (None, None))
+            if kind == "tof" and fr is not None and fr - stop_at < along:
+                along = fr - stop_at                    # the wall is nearer than the pose says
+                tof_stop = True
             if abs(along) < C.POS_TOL and abs(v) < 0.2:
                 break
             left_on, right_on = self.corner_ir()
@@ -254,9 +281,12 @@ class Motion:
             if abs(vdes) < C.V_MIN:
                 vdes = math.copysign(C.V_MIN, along)
             v += clamp(vdes - v, C.A_MAX * dt)
-            vl = clamp(C.LAT_KP * lat, C.LAT_VMAX)
+            werr, case = self.wall_error(d)             # Dhai_8: centre on the side walls
+            cases.add(case)
+            vl = 0.0 if werr is not None else clamp(C.LAT_KP * lat, C.LAT_VMAX)
             vn, ve = (s * v, vl) if ns else (vl, s * v)
-            cx, cy = to_chassis(vn, ve, yaw)            # forward + sideways centring
+            cx, cy = to_chassis(vn, ve, yaw)            # forward (+ pose centring, no walls)
+            cy += self.wall_pi(werr, dt)
             cy += self.too_close_push(d)                # something really close: away
             if left_on or right_on:                     # scraping a corner: steer away
                 cx *= C.IR_SLOW
@@ -266,7 +296,68 @@ class Motion:
             nxt += dt
             hal.sleep(max(0.0, nxt - hal.now()))
         self.settle()
+        if tof_stop:
+            self._front_anchor(d)
+        self.align(d)
+        self._step_log(start, d, cases)
         return self.cell()
+
+    def _front_anchor(self, d):
+        """Stopped on the front ToF: put the pose's along axis where the wall (or
+        a plate 8 cm in front of it) says.  Where it may be either, the smaller
+        correction is taken; the localiser finishes the job after the scan."""
+        fr, kind = self.hal.ranges_ex().get(d, (None, None))
+        if kind != "tof" or fr is None or fr > C.SIDE_NOMINAL + C.WALL_ERR_MAX + 0.10:
+            return
+        x, y, _ = self.pose()
+        c = self.cell()
+        ns, s = d in "NS", SIGN[d]
+        pos = y if ns else x
+        b = (c[1] if ns else c[0]) * T + s * T / 2      # wall line ahead of this cell
+        # the beam hits a plate or the wall beside it; a checked face without a
+        # plate is only the wall
+        surf = [b] if (c, d) in self.maze.faces and (c, d) not in self.ignore \
+            else [b, b - s * C.TARGET_WALL_GAP]
+        new = min((v - s * fr for v in surf), key=lambda p: abs(p - pos))
+        corr = clamp(new - pos, C.FRONT_ANCHOR_MAX)
+        if ns:
+            self.off_n += corr
+        else:
+            self.off_e += corr
+
+    def align(self, d, t=C.ALIGN_TIME):
+        """Dhai_8 align_at_cell_center: in place, sideways only, on the side walls
+        until |error| < deadband (no side wall seen: nothing to do)."""
+        hal = self.hal
+        end = hal.now() + t
+        self._wi = 0.0
+        while hal.now() < end and not self.abort.is_set():
+            self.localize()
+            err, _ = self.wall_error(d)
+            if err is None or abs(err) < C.WALL_DEADBAND:
+                break
+            yaw = self.pose()[2]
+            hal.drive(0.0, self.wall_pi(err, 1.0 / C.CTRL_HZ) + self.too_close_push(d),
+                      self.hold_wz(yaw))
+            hal.sleep(1.0 / C.CTRL_HZ)
+        self.settle()
+
+    def _step_log(self, start, d, cases):
+        """One line per grid step (Dhai_8 "Grid Step Done"): where it thinks it is,
+        what the side sensors say, which wall cases steered it."""
+        x, y, yaw = self.pose()
+        c = self.cell()
+        left, right = self.side_readings(d)
+        err, case = self.wall_error(d)
+        lo, ro = self.corner_ir()
+        f = lambda v: "far" if v is None else "%.2f" % v
+        print("[step] %s->%s %s | pose (%.2f, %.2f) yaw %+.0f | left of centre %+.1f cm | "
+              "L %s R %s | wall %s err %s | used %s%s" % (
+                  start, c, d, x, y, yaw,
+                  100 * ((c[0] * T - x) if d in "NS" else (c[1] * T - y)) * (1 if d in "NW" else -1),
+                  f(left), f(right), case, "-" if err is None else "%+.1f cm" % (100 * err),
+                  "/".join(sorted(cases)) or "-",
+                  " | IR %s%s" % ("L" if lo else "", "R" if ro else "") if lo or ro else ""))
 
     def side_readings(self, d):
         """(left, right) wall distances (m from the centre) for a robot facing d,
@@ -279,6 +370,77 @@ class Motion:
             r = ex.get(side_dir(d, side), (None, ""))[0]
             out.append(r if r is not None and r < C.SIDE_WALL_MAX else None)
         return out
+
+    def wall_error(self, d):
+        """Dhai_8 WallCenteringPID cases for a robot facing d: (error m, case).
+        error > 0 = the robot sits left of the centre line (strafe right).
+          both walls  -> (R - L) / 2      left only -> NOMINAL - L
+          right only  -> R - NOMINAL      none      -> (None, "none")
+        A side with a known target plate on its wall reads the plate or the wall
+        beside it (whichever the pose predicts).  A side is left out while its
+        corner IR is on (the Sharp folds back and reads LONG closer than 4 cm), or
+        when it reads more than WALL_ERR_MAX off the nominal distance, or more
+        than WALL_POSE_GATE off what the pose predicts, unless the pose predicts
+        it closely: an unseen plate stands 8 cm in front of its wall (reads
+        short) and a Sharp closer than 4 cm folds back (reads long, or even
+        nominal - chasing that drives INTO the wall).  TOO_CLOSE and the corner IR still
+        guard a wall that really is that close."""
+        from hal import side_dir
+        left, right = self.side_readings(d)
+        lo, ro = self.corner_ir()
+        c = self.cell()
+        x, y, _ = self.pose()
+        lx, ly = DV[side_dir(d, "L")]
+        lat = (x - c[0] * T) * lx + (y - c[1] * T) * ly     # pose: m left of the centre line
+
+        def use(r, side, ir_on):
+            if r is None or ir_on:
+                return None
+            want = C.SIDE_NOMINAL + (-lat if side == "L" else lat)
+            if (c, side_dir(d, side)) in self.ignore:
+                r = min((r, r + C.TARGET_WALL_GAP), key=lambda v: abs(v - want))
+            if abs(r - want) <= C.WALL_POSE_TOL:
+                return r                                # the pose agrees
+            if abs(r - C.SIDE_NOMINAL) <= C.WALL_ERR_MAX and abs(r - want) <= C.WALL_POSE_GATE:
+                return r                                # near nominal, pose not far off
+            return None
+        left, right = use(left, "L", lo), use(right, "R", ro)
+        if left is not None and right is not None:
+            err, case = (right - left) / 2, "both"
+        elif left is not None:
+            err, case = C.SIDE_NOMINAL - left, "left"
+        elif right is not None:
+            err, case = right - C.SIDE_NOMINAL, "right"
+        else:
+            return None, "none"
+        err = clamp(err, C.WALL_ERR_MAX)
+        self._anchor(d, err)
+        return err, case
+
+    def _anchor(self, d, err):
+        """The walls say the robot sits err left of the centre line: pull the
+        pose's sideways axis there.  Odometry counts the centring strafe as real
+        motion (the wheels slide), so without this the pose drifts off and the
+        pose fallback steers into a wall once the side walls end."""
+        from hal import side_dir
+        c = self.cell()
+        lx, ly = DV[side_dir(d, "L")]
+        x, y, _ = self.pose()
+        if d in "NS":
+            self.off_e += clamp(C.SNAP_GAIN * (c[0] * T + err * lx - x), C.SNAP_STEP_MAX)
+        else:
+            self.off_n += clamp(C.SNAP_GAIN * (c[1] * T + err * ly - y), C.SNAP_STEP_MAX)
+
+    def wall_pi(self, err, dt):
+        """Sideways chassis speed (+ = right) from the wall error: PI with the
+        Dhai_8 deadband; the integral holds against a steady wheel slide."""
+        if err is None:
+            self._wi = 0.0
+            return 0.0
+        self._wi = clamp(self._wi + err * dt, C.WALL_I_MAX)
+        if abs(err) < C.WALL_DEADBAND:
+            return clamp(C.WALL_KI * self._wi, C.WALL_VMAX)
+        return clamp(C.WALL_KP * err + C.WALL_KI * self._wi, C.WALL_VMAX)
 
     def too_close_push(self, d):
         """Sideways speed (chassis, + = right) away from a side that is REALLY close
@@ -293,19 +455,28 @@ class Motion:
         return push
 
     def center_in_cell(self):
-        """Drive to the centre of the current cell by the pose estimate (Dhai_8's
-        align_at_cell_center).  Called after the scan: by then the camera has checked
+        """Drive to the centre of the current cell: sideways on the side walls
+        (Dhai_8's align_at_cell_center), along the heading by the pose estimate.  Called after the scan: by then the camera has checked
         the cell's walls, so the localiser knows which readings are target plates and
         its corrections can be trusted over a wider range."""
         hal = self.hal
         end = hal.now() + C.CENTER_TIME
         ok_ticks = 0
         c = self.cell()
+        d = self.heading
+        self._wi = 0.0
         while hal.now() < end and not self.abort.is_set():
             self.localize()
             x, y, yaw = self.pose()
             en, ee = c[1] * T - y, c[0] * T - x         # map error to the cell centre
-            if abs(en) <= C.CENTER_TOL and abs(ee) <= C.CENTER_TOL:
+            werr, _ = self.wall_error(d)                # sideways: the side walls rule
+            if werr is not None:
+                if d in "NS":
+                    ee = 0.0
+                else:
+                    en = 0.0
+            lat_ok = werr is None or abs(werr) < C.WALL_DEADBAND
+            if abs(en) <= C.CENTER_TOL and abs(ee) <= C.CENTER_TOL and lat_ok:
                 hal.stop()
                 ok_ticks += 1
                 if ok_ticks >= 3:
@@ -315,6 +486,7 @@ class Motion:
                 vn = clamp(C.CENTER_KP * en, C.CENTER_VMAX) if abs(en) > C.CENTER_TOL else 0.0
                 ve = clamp(C.CENTER_KP * ee, C.CENTER_VMAX) if abs(ee) > C.CENTER_TOL else 0.0
                 cx, cy = to_chassis(vn, ve, yaw)
+                cy += self.wall_pi(werr, 1.0 / C.CTRL_HZ)
                 hal.drive(cx, cy, self.hold_wz(yaw))
             hal.sleep(1.0 / C.CTRL_HZ)
         hal.stop()

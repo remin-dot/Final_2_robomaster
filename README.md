@@ -18,11 +18,24 @@ This follows robomaster-assignment2-4x4_Dhai_8.
   the IMU yaw. If the error grows, the turn-command sign is flipped once. The
   robot always drives forward, so the gimbal ToF and the two front-corner IR
   modules guard the way ahead, and the side Sharps keep it centred.
-* **Drive exactly one cell and stop on its centre.** Heading is held, and the
-  Sharps pull the robot back to the middle between the walls. The ToF ahead
-  and the wall-snap localisation place the stop. The robot stands still
-  briefly before the next step. Set `GRID_STEP = False` in `config.py` to
-  drive straight corridors in one run instead.
+* **Drive exactly one cell and stop on its centre.** Heading is held.
+  Sideways, Dhai_8's wall-centring PID steers straight from the side Sharps:
+  both walls → (R − L)/2, one wall → its distance against `SIDE_NOMINAL`, no
+  wall → the pose. The pose's sideways axis is re-anchored to what the walls
+  say, because odometry counts the centring strafe as real motion. A side
+  reading is not used when:
+  * it is more than 5 cm off nominal, since an unseen target plate reads short
+    and a Sharp closer than 4 cm folds back and reads long;
+  * it is 8 cm off what the pose predicts;
+  * that side's corner IR is on.
+
+  The stop comes from the pose, or from the gimbal ToF if the wall ahead is
+  nearer (Dhai_8's front-wall stop), and the pose is re-anchored there too.
+  After each step, `align` centres on the side walls in place, then the robot
+  stands still briefly. If a shooting back-off left the robot off-centre, it
+  re-centres before the next turn. Every step prints a `[step]` line to the log.
+  Set `GRID_STEP = False` in `config.py` to drive straight corridors in one run
+  instead.
 * **Gimbal: relative move actions of at most 90°.** Each move is planned from
   the commanded position and never corrected from the angle feed, then the
   gimbal settles for 0.25 s. This avoids the "snake" shaking that a speed loop
@@ -32,6 +45,23 @@ This follows robomaster-assignment2-4x4_Dhai_8.
   a penalty for each change of direction.
 * **Round 2 plans the whole route.** It tries every target order and every
   legal firing cell, then drives the cheapest route.
+
+Not part of the movement, but still active (`mission.py`, `hal.py`):
+
+* **Start of a round:** the gimbal ToF measures the wall beside the robot, and
+  the left Sharp is calibrated against it. If the start tile has no wall
+  beside the robot, this happens at the first cell that has one.
+* **Odometry frame:** `odom()` rotates the SDK position by the heading since
+  power-on. Two real runs showed that the SDK's position frame is the robot's
+  power-on frame. The round start logs `[hal] round start: heading ...`.
+* **After each cell's scan:** the gimbal ToF measures the cell's walls and
+  corrects the pose, logged as `[centre]`. `center_in_cell` then drives to the
+  true centre. With two walls on an axis, the readings must add up to 60 cm;
+  with one wall, the camera must have checked it and found no card on it.
+* **Driven edges:** an edge the robot has driven through is never re-marked as
+  a wall.
+* **Round 2:** a failed drive to a firing spot is planned and tried once more
+  (`ROUND2_TRIES`).
 
 ## What counts as a card (segmentation)
 
@@ -190,6 +220,13 @@ leave it out, the robot shoots every class in `SHOOT_CLASSES`.
 
 Ctrl-C stops the robot and still saves the map drawn so far.
 
+Every round that ends also gets its own folder,
+`out/runs/<date>_<time>_round<N>/`. That includes rounds ended with STOP, Ctrl-C
+or an error, and rounds run from the panel or from `main.py`. The folder holds
+that round's map (`round<N>.png`, `.svg`, `.txt`, `.json`) and `log.txt`, which
+contains only that round's log. The `out/round1.*` files are still written,
+because round 2 reads `out/round1.json`.
+
 ## Control panel (pygame)
 
 ```bash
@@ -271,13 +308,62 @@ Results over 30 random mazes:
 ## Targets on walls
 
 * **Placement:** a target stands against a wall of a cell and faces into the
-  cell. One cell can hold several targets, one per wall. Each target is stored
-  as its cell plus the wall it's on (`N`, `E`, `S` or `W`).
+  cell. A cell can hold several targets, and so can one wall. Each target is
+  stored as its cell plus the wall it's on (`N`, `E`, `S` or `W`).
+* **Never a card:** anything less than `CARD_MIN_H` (0.10 m) above the floor.
+  Real cards measured 0.17–0.25 m.
+* **A map that closes the robot in is wrong.** The maze is connected, so if
+  cells can't be reached, the walls on the border of the reached area are
+  re-measured with the gimbal ToF before round 1 ends. A card seen well beyond
+  a mapped wall also marks that wall for re-measuring.
+* **Every card seen goes on the map**, shot or not.
+  * Whenever the robot stands still (after each move, after each scan), every
+    card confirmed in the picture is placed. Its range and bearing give a ray
+    from the robot, and the ray is walked cell by cell through the map. The
+    card stands just in front of the first wall it meets (`place`), even when
+    it isn't on the wall straight ahead.
+  * **Wrong detections come off the map.** A card's wall can be checked again
+    in three ways: the camera looks straight at it from one or more cells away;
+    or a shot attempt from a cell away loses it completely. Not seeing it up
+    close, looking down, doesn't count: at about 0.12 m a card may not fit
+    the picture. If the card isn't there at least as many times as it was seen
+    (`MISS_REMOVE`), it's removed, logged as `REMOVED ...`. A shot card is
+    never removed. A real card removed by mistake comes back the next time it's
+    seen.
+  * The maps (panel, PNG, SVG) spread several cards on one wall along it. The
+    text map shows up to 3 letters per cell, or 2 letters and the count.
+* **Unknown map (round 1).** Only the 6×6 grid is known; walls and targets are
+  found as the robot goes. Round 1 ends when every edge is mapped and every wall
+  face is checked.
+  * **Next cell:** the nearest cell that still gains something. Gain is its
+    unknown edges, its unchecked walls, designated targets that can be shot
+    from there, and a dead end not yet searched. A cell that gains more counts
+    as nearer (`VALUE_PULL`), and the first turn counts too.
+    `GOAL_RULE = "rate"` switches to gain per second instead; it was slower in
+    the simulator.
+  * **Time budget:** after `EXPLORE_FRACTION` (75%) of round 1, cells from which
+    found designated targets can be shot come first, then exploring continues.
+    A cell it can't reach in time is skipped, and a cell scanned twice only
+    counts for shooting.
+  * **In the simulator (30 random mazes):**
+
+    | Round 1 limit | Hits (shot in R1 / R2) |
+    |---|---|
+    | 10 min | all 150 / 150, as before |
+    | 200 s | 121 / 112 (was 102 / 81) |
 * **Exploration:** round 1 checks every wall face in the maze with the camera.
   A face counts as checked when the camera has looked straight at it from
   within `VIEW_RANGE_M`, and faces seen down a corridor count too. Round 1
   ends when every face is checked, or earlier once `EXPECTED_TARGETS` targets
   are mapped and every designated one is shot, if you set that number.
+* **Dead ends** (a block with 3 walls; Dhai_8 branch `stamp`): when the robot
+  enters one, it turns the gimbal to each of the 3 walls and tilts down to
+  `DEAD_END_PITCH` (−20°) in the same move (log line `[dead end] ... looking
+  down`). Up close, a card on a stick sits below the camera
+  and is out of a level picture. It sweeps `DEAD_END_SWEEP` (0°, −18°, +18°),
+  maps every confirmed card on that wall, and shoots a designated one there,
+  still tilted down, using the usual aim. In round 2, a target whose firing
+  spot is inside its dead end is shot the same way.
 * **Shooting:** the robot always shoots facing the target's wall, from inside
   its cell or from a cell behind it. The camera-to-plate distance must be at
   most `FIRE_RANGE_M`, which is 2 × `TILE` = 1.2 m. Round 2 prefers the spot

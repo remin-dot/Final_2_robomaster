@@ -79,6 +79,10 @@ class SimHAL:
         self.sharp_err = {}                     # simulated calibration error per side (m)
         self.turn_slip = 0.0                    # odometry error per degree turned (m)
         self.sharp_glitch = 0.0                 # chance a Sharp reading comes out 9 cm long
+        self.sharp_dead = set()                 # sides whose Sharp always reads "far"
+        self.odom_frame = 0.0                   # test: odometry frame turned this much (deg)
+        self.odom_rot = 0.0                     # correction applied by motion's self-check
+        self.slide = 0.0                        # unseen sideways drift (share of forward speed, + = left)
         self.sharp_bias = {s: 0.0 for s in C.SHARP}
         self.hits = []
         self.collisions = set()
@@ -110,6 +114,7 @@ class SimHAL:
         self.x, self.y = C.START_CELL[0] * T, C.START_CELL[1] * T
         self.yaw, self.odo = 0.0, [0.0, 0.0]
         self.cmd = self.vel = (0.0, 0.0, 0.0)
+        self.odom_rot = 0.0
         self.gimbal_yaw, self.gimbal_pitch = 0.0, C.GIMBAL_PITCH
 
     def _physics(self, h):
@@ -120,10 +125,13 @@ class SimHAL:
         r = math.radians(self.yaw)
         vn = vx * math.cos(r) - vy * math.sin(r)
         ve = vx * math.sin(r) + vy * math.cos(r)
-        nx, ny = self.x + ve * h, self.y + vn * h
-        nx, ny = self._collide(nx, ny)
         self.odo[0] += vn * h * self.odo_scale
         self.odo[1] += ve * h * self.odo_scale
+        if self.slide:                          # mecanum rollers slide; the encoders miss it
+            sl = self.slide * abs(vx)
+            vn, ve = vn + sl * math.sin(r), ve - sl * math.cos(r)
+        nx, ny = self.x + ve * h, self.y + vn * h
+        nx, ny = self._collide(nx, ny)
         if self.turn_slip and abs(wz) > 5:      # wheels slip while turning in place
             self.odo[0] += self.rnd.gauss(0, self.turn_slip * abs(wz) * h)
             self.odo[1] += self.rnd.gauss(0, self.turn_slip * abs(wz) * h)
@@ -150,7 +158,10 @@ class SimHAL:
 
     # ---------------------------------------------------------- reads ----
     def odom(self):
-        return self.odo[0], self.odo[1], (self.yaw + 180) % 360 - 180
+        a = math.radians(self.odom_frame + self.odom_rot)   # test knob / its correction
+        n, e = self.odo
+        return (n * math.cos(a) + e * math.sin(a), -n * math.sin(a) + e * math.cos(a),
+                (self.yaw + 180) % 360 - 180)
 
     def _raw_range(self, d):
         c = (int(round(self.x / T)), int(round(self.y / T)))
@@ -182,6 +193,9 @@ class SimHAL:
         if h is not None:
             for side in C.SHARP:
                 d = side_dir(h, side)
+                if side in self.sharp_dead:
+                    out[d] = (None, "sharp")
+                    continue
                 r = self._raw_range(d) + self.rnd.gauss(0, 0.006) + self.sharp_err.get(side, 0.0)
                 if self.sharp_glitch and self.rnd.random() < self.sharp_glitch:
                     r += 0.09                       # a long reading (panel gap / fold-back)
@@ -197,15 +211,17 @@ class SimHAL:
                 out[d] = (r if r - C.TOF_OFFSET < C.TOF_MAX else None, "tof")
         return out
 
-    def side_bias_check(self):
+    def side_bias_check(self, ref=None, strict=False):
         from hal import side_dir
         out = {}
         h = self.heading() or "N"
         for side in C.SHARP:
+            if side in self.sharp_dead or (strict and side not in (ref or {})):
+                continue
             r = self._raw_range(side_dir(h, side)) + self.sharp_err.get(side, 0.0)
             if r - C.SHARP_OFFSET[side] > C.SHARP_MAX or r > C.SIDE_WALL_MAX:
                 continue
-            bias = r - C.SIDE_NOMINAL
+            bias = r - (ref or {}).get(side, C.SIDE_NOMINAL)
             if abs(bias) <= C.SHARP_BIAS_MAX:
                 self.sharp_bias[side] = bias
                 out[side] = bias
@@ -226,6 +242,20 @@ class SimHAL:
 
     def ranges(self):
         return {d: r for d, (r, _) in self.ranges_ex().items()}
+
+    def side_raw(self):
+        """(left, right) side Sharps at any heading (nearest wall direction)."""
+        out = []
+        for side, off in (("L", -90.0), ("R", 90.0)):
+            if side in self.sharp_dead:
+                out.append(None)
+                continue
+            a = (self.yaw + off) % 360.0
+            k = int(round(a / 90.0)) % 4
+            miss = math.radians(a - 90.0 * round(a / 90.0))
+            r = self._raw_range("NESW"[k]) / max(0.2, math.cos(miss))
+            out.append(r if C.SHARP_MIN <= r - C.SHARP_OFFSET[side] <= C.SHARP_MAX else None)
+        return tuple(out)
 
     def sensor_ok(self, d):
         return d in self.ranges_ex()

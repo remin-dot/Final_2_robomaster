@@ -40,6 +40,7 @@ class Maze:
         self.visited = set()
         self.observed = set()   # cells the camera has looked into
         self.faces = set()      # (cell, dir) wall faces the camera has checked for targets
+        self.driven = set()     # edge keys the robot has driven through: never a wall
 
     # ---------------------------------------------------------- edges ----
     def inside(self, c):
@@ -60,8 +61,17 @@ class Maze:
         if self.boundary and not self.inside(step(c, d)):
             return
         k = self._key(c, d)
+        if v == WALL and k in self.driven:
+            return                      # driven through it: a reading off-centre, not a wall
         if force or k not in self.edges:
             self.edges[k] = v
+
+    def drove(self, c, d):
+        """The robot drove from c towards d: that edge is open, for good."""
+        if self.inside(c) and self.inside(step(c, d)):
+            k = self._key(c, d)
+            self.driven.add(k)
+            self.edges[k] = OPEN
 
     def ray(self, c, d, maxlen, peek=True):
         """Cells seen looking from c towards d: through OPEN edges, plus (peek)
@@ -132,9 +142,9 @@ class Maze:
                 return self._unwind(state), g
         return None, None
 
-    def costs_from(self, start, cost_tile=1.0, cost_seg=1.0, blocked=()):
+    def costs_from(self, start, cost_tile=1.0, cost_seg=1.0, blocked=(), start_dir=None):
         out = {}
-        for c, g, _ in self._search(start, cost_tile, cost_seg, None, blocked):
+        for c, g, _ in self._search(start, cost_tile, cost_seg, start_dir, blocked):
             out.setdefault(c, g)
         return out
 
@@ -146,6 +156,7 @@ class Maze:
             "visited": sorted(self.visited),
             "observed": sorted(self.observed),
             "faces": sorted([list(c), d] for c, d in self.faces),
+            "driven": sorted(list(k) for k in self.driven),
         }
 
     @classmethod
@@ -155,4 +166,5 @@ class Maze:
         m.visited = {tuple(c) for c in d.get("visited", [])}
         m.observed = {tuple(c) for c in d.get("observed", [])}
         m.faces = {(tuple(c), s) for c, s in d.get("faces", [])}
+        m.driven = {tuple(k) for k in d.get("driven", [])}
         return m

@@ -31,7 +31,7 @@ import pygame
 
 import config as C
 import mapdraw
-from mapdraw import tpos
+from mapdraw import layout
 from hal import wrap
 from maze import DIRS, WALL, Maze
 from mission import Mission
@@ -232,6 +232,7 @@ class LogTee:
         self.lines = collections.deque(maxlen=n)
         self.orig = sys.stdout
         self._buf = ""
+        self.round_log = None                  # list of text while a round runs
         try:                                   # everything also goes to out/panel_log.txt
             os.makedirs(C.OUT_DIR, exist_ok=True)
             self.file = open(os.path.join(C.OUT_DIR, "panel_log.txt"), "a", buffering=1)
@@ -241,6 +242,8 @@ class LogTee:
 
     def write(self, s):
         self.orig.write(s)
+        if self.round_log is not None:
+            self.round_log.append(s)
         if self.file:
             try:
                 self.file.write(s)
@@ -450,6 +453,8 @@ class App:
         self.hal.stop()
         self.hal.rezero()
         self.hal.fire_enabled = self.armed
+        self.log.round_log = ["===== round %d started %s =====\n" % (
+            self.round_no, time.strftime("%Y-%m-%d %H:%M:%S"))]      # this round's own log
         self.mission = Mission(self.hal, self.round_no, sorted(self.shoot), maze, targets)
         self.thread = threading.Thread(target=self._run, args=(self.mission,), daemon=True)
         self.thread.start()
@@ -466,6 +471,14 @@ class App:
             self.last[m.round] = data
             base = mapdraw.save(data, C.OUT_DIR, "%sround%d" % (self.prefix, m.round))
             print("[panel] round %d saved -> %s.png/.svg/.json" % (m.round, base))
+            try:                                # its own folder: map + this round's log
+                text = "".join(self.log.round_log or [])
+                folder = mapdraw.save_run(data, C.OUT_DIR, "%sround%d" % (self.prefix, m.round), text)
+                print("[panel] round %d map + log -> %s" % (m.round, folder))
+            except OSError as e:
+                print("[panel] could not save the round folder: %s" % e)
+            finally:
+                self.log.round_log = None
 
     def stop(self):
         if self.mission is not None:
@@ -877,11 +890,11 @@ class App:
                 pygame.draw.lines(s, ui.pal["path"], False, [g2p(*c) for c in path], 3)
             for c in set(path):
                 pygame.draw.circle(s, ui.pal["path"], [int(v) for v in g2p(*c)], 3)
-        for t in self.targets_now():
-            self.draw_map_target(t, g2p(*tpos(t)), cs)
+        for t, p in layout(self.targets_now()):
+            self.draw_map_target(t, g2p(*p), cs)
         if self.show_truth and hasattr(self.hal, "targets"):
-            for t in self.hal.targets:
-                x, y = g2p(*tpos(t))
+            for t, p in layout(self.hal.targets):
+                x, y = g2p(*p)
                 color, _ = label_parts(t["label"])
                 pygame.draw.circle(s, CARD_RGB.get(color, (128, 128, 128)), (int(x), int(y)),
                                    int(cs * 0.2), 1)

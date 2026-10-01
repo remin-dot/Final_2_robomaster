@@ -27,24 +27,51 @@ def save(data, out_dir, name):
     return base
 
 
+def save_run(data, out_dir, name, log_text):
+    """A finished round: its own folder out_dir/runs/<date_time>_<name>/ with the
+    map (json, svg, txt, png) and the log of that round only.  Returns the folder."""
+    import time
+    folder = os.path.join(out_dir, "runs", "%s_%s" % (time.strftime("%Y%m%d_%H%M%S"), name))
+    save(data, folder, name)
+    with open(os.path.join(folder, "log.txt"), "w") as f:
+        f.write(log_text)
+    return folder
+
+
 def load(path):
     with open(path) as f:
         return json.load(f)
 
 
 def _tmark(data):
-    """cell -> up to 3 letters, one per target in that cell."""
+    """cell -> 3 characters: one letter per target, or 2 letters + the count when
+    a cell holds more than 3."""
     marks = {}
     for t in data["targets"]:
         ch = t["label"][0].upper() if t.get("shot") else t["label"][0].lower()
-        marks[tuple(t["cell"])] = (marks.get(tuple(t["cell"]), "") + ch)[:3]
-    return marks
+        marks[tuple(t["cell"])] = marks.get(tuple(t["cell"]), "") + ch
+    return {c: (s if len(s) <= 3 else s[:2] + (str(len(s)) if len(s) < 10 else "+"))
+            for c, s in marks.items()}
 
 
-def tpos(t, k=0.32):
-    """Grid position of a target: against its wall, not the cell centre."""
+def tpos(t, k=0.32, i=0, n=1):
+    """Grid position of a target: against its wall, not the cell centre; the
+    i-th of n on the same wall is spread out along it."""
     dx, dy = DV.get(t.get("side") or "", (0, 0))
-    return t["cell"][0] + dx * k, t["cell"][1] + dy * k
+    along = (i - (n - 1) / 2.0) * min(0.2, 0.42 / max(1, n - 1))   # clear of the corners
+    return t["cell"][0] + dx * k + abs(dy) * along, t["cell"][1] + dy * k + abs(dx) * along
+
+
+def layout(targets):
+    """[(target, grid position)] - several targets per cell and per wall."""
+    groups = {}
+    for t in targets:
+        groups.setdefault((tuple(t["cell"]), t.get("side")), []).append(t)
+    out = []
+    for ts in groups.values():
+        for i, t in enumerate(ts):
+            out.append((t, tpos(t, k=0.36, i=i, n=len(ts))))
+    return out
 
 
 def ascii_map(data, m):
@@ -110,8 +137,8 @@ def svg_map(data, m):
              % (sx, sy, sx - 16, sy + 24))
     ex, ey = xy(*data["path"][-1])
     o.append('<rect x="%.1f" y="%.1f" width="14" height="14" fill="#555"/>' % (ex - 7, ey - 7))
-    for t in data["targets"]:
-        cx, cy = xy(*tpos(t))
+    for t, p in layout(data["targets"]):
+        cx, cy = xy(*p)
         col = COLORS.get(t["label"].split("_")[0], "#888")
         sh = label_parts(t["label"])[1]
         w, h = {"circle": (18, 18), "wide": (24, 14), "tall": (14, 24)}.get(sh, (18, 18))
@@ -169,10 +196,10 @@ def png_map(data, m, fname):
     pts = np.array([ip(xy(*c)) for c in data["path"]], np.int32)
     cv2.polylines(img, [pts], False, (232, 115, 26), 3)
     cv2.circle(img, ip(xy(*data["start"])), 9, (232, 115, 26), -1)
-    for t in data["targets"]:
+    for t, p in layout(data["targets"]):
         hexcol = COLORS.get(t["label"].split("_")[0], "#888888").lstrip("#")
         bgr = tuple(int(hexcol[i:i + 2], 16) for i in (4, 2, 0))
-        c = ip(xy(*tpos(t)))
+        c = ip(xy(*p))
         cv2.circle(img, c, 9, bgr, -1)
         if t.get("shot"):
             cv2.circle(img, c, 14, (74, 158, 30), 2)

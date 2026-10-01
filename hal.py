@@ -113,6 +113,8 @@ class RoboMasterHAL:
 
         self._odom = (0.0, 0.0)
         self._yaw = 0.0
+        self._odom_yaw = None       # attitude yaw when the position frame was fixed
+        self.odom_rot = 0.0         # extra frame correction (motion's self-check), deg
         self._gimbal_actual = (C.GIMBAL_PITCH, 0.0)          # (pitch, yaw) vs chassis
         self._tof = {d: deque(maxlen=5) for d in "NESW"}      # (t, metres | None)
         self._tof_seen = False                                # any non-zero ToF value yet
@@ -207,10 +209,14 @@ class RoboMasterHAL:
 
     # ------------------------------------------------------- callbacks ----
     def _on_pos(self, info):
-        self._odom = (info[0], info[1])        # world frame of the start: x = N, y = E
+        # sub_position(cs=0): x forward / y right of the robot AS IT STOOD WHEN
+        # SUBSCRIBED (at connect) - odom() turns it into the start frame
+        self._odom = (info[0], info[1])
 
     def _on_att(self, info):
         self._yaw = info[0]                    # deg, + = clockwise
+        if self._odom_yaw is None:             # the heading the position frame is fixed to
+            self._odom_yaw = info[0]
 
     def _on_gimbal(self, info):
         # pitch, yaw relative to the chassis, in the same sign as our commands
@@ -392,27 +398,41 @@ class RoboMasterHAL:
     def rezero(self):
         """Robot was (re)placed on the start tile facing North."""
         self.yaw0 = self._yaw
+        self.odom_rot = 0.0
+        print("[hal] round start: heading %.0f deg from power-on (heading at connect %.0f) - "
+              "odometry turned by %.0f deg" % (self._yaw, self._odom_yaw if self._odom_yaw is not None
+                                             else float("nan"), self.yaw0))
 
     # ------------------------------------------------------------ reads ----
     def odom(self):
-        """(north m, east m, yaw deg relative to start)."""
+        """(north m, east m, yaw deg relative to start).  The SDK position frame
+        turned out to be the robot's POWER-ON frame (two runs: odometry 175-180 deg
+        off with the robot not turned after connect), like the attitude yaw; North
+        is set at the round start (rezero).  Rotate by the heading from power-on,
+        plus motion's measured correction odom_rot.  Wrong, this read driving N as
+        S, or a few deg of false sideways drift every cell."""
         yaw = self._yaw - self.yaw0
         yaw = (yaw + 180.0) % 360.0 - 180.0
-        return self._odom[0], self._odom[1], yaw
+        a = math.radians(((self.yaw0 + 180.0) % 360.0 - 180.0) + self.odom_rot)
+        x, y = self._odom
+        return x * math.cos(a) + y * math.sin(a), -x * math.sin(a) + y * math.cos(a), yaw
 
-    def side_bias_check(self):
-        """Robot standing on the centre of the start tile: a side Sharp that sees a
-        wall should read SIDE_NOMINAL.  Stores the difference (a calibration
-        offset), ignoring anything larger than SHARP_BIAS_MAX (a target plate)."""
+    def side_bias_check(self, ref=None, strict=False):
+        """A side Sharp that sees a wall should read ref[side] (the gimbal ToF on
+        that wall), or SIDE_NOMINAL without one (robot on the tile centre).
+        Stores the difference (a calibration offset), ignoring anything larger
+        than SHARP_BIAS_MAX (a target plate)."""
         out = {}
         for side, q in self._sharp.items():
             vals = [v for v in list(q)[-5:] if v is not None]
             if len(vals) < 3 or self._sharp_nodata[side]:
                 continue
+            if strict and side not in (ref or {}):
+                continue                                # only against a ToF measurement
             r = statistics.median(vals)
             if r > C.SIDE_WALL_MAX:
                 continue                                # no wall that side
-            bias = r - C.SIDE_NOMINAL
+            bias = r - (ref or {}).get(side, C.SIDE_NOMINAL)
             if abs(bias) <= C.SHARP_BIAS_MAX:
                 self.sharp_bias[side] = bias
                 out[side] = bias
@@ -446,6 +466,17 @@ class RoboMasterHAL:
 
     def ranges(self):
         return {d: r for d, (r, _) in self.ranges_ex().items()}
+
+    def side_raw(self):
+        """(left, right) side Sharps, m from the robot centre, any heading (also
+        while turning); None = no reading."""
+        out = []
+        for side in ("L", "R"):
+            q = list(self._sharp.get(side, ()))[-3:]
+            vals = [v - self.sharp_bias[side] for v in q if v is not None]
+            out.append(None if self._sharp_nodata.get(side, True) or len(vals) * 2 <= len(q)
+                       else statistics.median(vals))
+        return tuple(out)
 
     def _set_io(self, n, v):
         self._io[n] = v

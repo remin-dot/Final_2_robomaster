@@ -45,7 +45,30 @@ def make_hal(args):
     return RoboMasterHAL(fire_enabled=not args.no_fire)
 
 
+class _RoundLog:
+    """Copy of everything printed during a round (for its run folder)."""
+
+    def __init__(self):
+        self.orig, self.parts = sys.stdout, []
+
+    def write(self, s):
+        self.orig.write(s)
+        self.parts.append(s)
+
+    def flush(self):
+        self.orig.flush()
+
+
 def run_round(args):
+    rlog = _RoundLog()
+    sys.stdout = rlog
+    try:
+        _run_round(args, rlog)
+    finally:
+        sys.stdout = rlog.orig
+
+
+def _run_round(args, rlog):
     hal = make_hal(args)
     shoot = parse_shoot(args.shoot)
     prefix = "sim_" if args.sim else ""
@@ -68,6 +91,9 @@ def run_round(args):
             data = m.to_dict()
             base = mapdraw.save(data, C.OUT_DIR, "%sround%d" % (prefix, args.round))
             print("[main] map saved: %s.{json,svg,txt,png}" % base)
+            folder = mapdraw.save_run(data, C.OUT_DIR, "%sround%d" % (prefix, args.round),
+                                      "".join(rlog.parts))
+            print("[main] round %d map + log -> %s" % (args.round, folder))
         if args.sim:
             print("[sim] truth:", hal.truth())
             print("[sim] shots:", hal.hits)

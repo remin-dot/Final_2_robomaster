@@ -44,6 +44,11 @@ FIRE_RANGE_M = FIRE_RANGE_TILES * TILE   # ... measured camera -> target plate
 AVOID_TARGET_CELLS = False  # True: never drive into a cell holding a target
 VIEW_TILES = 5              # how far down a corridor the camera looks
 VIEW_RANGE_M = 1.0          # a wall face counts as checked when seen this close
+SPOT_MAX_M = 2.5            # m, a card seen further than this is not put on the map
+SPOT_SLACK = 0.25           # m, card range error allowed when finding the wall behind it
+SPOT_THROUGH = 0.35         # m, a card this much beyond a mapped wall: that wall is wrong
+MISS_REMOVE = 1             # reliable looks at its wall without it (and >= times seen): off the map
+                            # (a real card removed by mistake is added again when seen)
                             # (7 cm cards: Final_Robomaster see_range_m)
 
 # -------------------------------------------------------------- sensors ----
@@ -123,6 +128,9 @@ TOO_CLOSE = 0.20            # m from the centre (~8 cm from the chassis side): p
 IR_STEER = 0.08             # m/s sideways away from a front-corner IR that is on
 IR_SLOW = 0.5               # forward speed share while a corner IR is on
 CENTER_TIME = 1.2           # s, centring in place after each cell scan (stops once centred)
+RECENTER_SUM_TOL = 0.05     # m  two ToF walls must add up to the cell within this (no plate)
+RECENTER_MAX = 0.18         # m  one wall: a correction larger than this is not trusted
+RECENTER_LOG = 0.03         # m  log corrections from this size
 SHARP_BIAS_MAX = 0.06       # m: start-of-round Sharp bias check accepts at most this
                             # (robot placed on the CENTRE of the start tile)
 CENTER_KP = 1.5             # 1/s
@@ -151,6 +159,7 @@ COST_TILE = 1.0
 COST_SEGMENT = 1.0
 COST_CLOSE_SPOT = 1.5       # round 2: extra cost to shoot from inside the target's cell
 ROUTE_EXACT_MAX = 12        # round 2: exact best order up to this many targets (else nearest-first)
+ROUND2_TRIES = 2            # round 2: plan + drive to a firing spot this many times (a move gave up)
 
 # --------------------------------------------------------- gimbal / gun ----
 # Gimbal (Dhai_8): relative move actions of at most GIMBAL_STEP_DEG, planned from
@@ -167,6 +176,12 @@ AIM_PITCH_OFFSET = 2.0      # deg, + = aim higher (hit at ~+2 deg on this robot)
 BARREL_BELOW_CAMERA_M = 0.03  # barrel under the camera: aim up atan(this / distance)
 AIM_TOL = 1.5               # deg
 MIN_SHOOT_M = 0.30          # closer than this: back off first if there is room (0.21 m missed)
+# Dead end (a block with 3 walls), Dhai_8 branch "stamp": in it, look DOWN at each of
+# its walls, sweep, shoot what is found there (a card on a stick sits below the camera
+# when this close - level, it is out of the picture)
+DEAD_END_PITCH = -20.0      # deg gimbal pitch while searching / shooting in a dead end
+DEAD_END_SWEEP = (0.0, -18.0, 18.0)   # deg yaw offsets around each wall
+DEAD_END_NEAR = 0.6         # m, a card seen further than this is not on the dead end's wall
 AIM_ITERS = 4
 FIRE_TYPE = "water"         # "water" (gel beads) or "ir"
 FIRE_TIMES = 2
@@ -198,7 +213,8 @@ MAX_RING_FILL = 0.25        # same colour all around the blob = a wall / tape / 
 NEUTRAL_SAT = 70            # saturation below this = white wall / grey floor
 MIN_NEUTRAL = 0.45          # share of neutral pixels around a card (clothes, robot: less)
 CAMERA_HEIGHT = 0.25        # m, lens above the floor
-CARD_MIN_H, CARD_MAX_H = 0.06, 0.45   # m, height of a card's centre above the floor
+CARD_MIN_H, CARD_MAX_H = 0.10, 0.45   # m, height of a card's centre above the floor
+                            # (real cards measured 0.17-0.25 m; the floor is 0 - any floor colour)
 BOTTOM_IGNORE = 0.15        # bottom share of the picture: the blaster barrel
 IGNORE_ABOVE_WALL = True    # the room above the white walls is never a card
 WALL_S_MAX = 60             # white foam wall: saturation at most this ...
@@ -214,6 +230,18 @@ CONFIRM_FRAMES = 2          # a card must show in this many frames in a row to c
 # --------------------------------------------------------------- timing ----
 ROUND_LIMIT = {1: 600.0, 2: 300.0}
 TIME_MARGIN = 10.0          # s, stop exploring this long before the limit
+# Round 1 on an unknown map: every edge mapped + every wall face checked, targets shot
+# as they are found.  The next cell to scan: see GOAL_RULE.  After EXPLORE_FRACTION of
+# the round, cells to shoot targets found so far come first (then exploring again)
+EXPLORE_FRACTION = 0.75     # of ROUND_LIMIT[1]: 7.5 of 10 min exploring, then shooting first
+VALUE_EDGE = 1.0            # per unknown edge at that cell (the map)
+VALUE_FACE = 1.0            # per unchecked wall face seen from there (the targets)
+VALUE_SHOT = 4.0            # per designated target that can be shot from there
+VALUE_DEAD_END = 2.0        # a dead end not searched yet (look-down search)
+GOAL_RULE = "near"          # "near": nearest useful cell (more gain = nearer) | "rate": gain per second
+VALUE_PULL = 0.3            # "near": tiles of travel one point of gain is worth
+SCAN_COST = 2.0             # "rate": a scan costs about as long as driving this many tiles
+SEC_PER_COST = 4.0          # s per tile of travel cost (incl. turns) - real runs ~3-4
 OUT_DIR = "out"
 PANEL_FPS = 60              # control panel redraw rate (the robot camera itself sends <= 30 fps)
 

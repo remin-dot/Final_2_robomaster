@@ -117,6 +117,17 @@ class Motion:
             else:
                 self.off_e += corr
 
+    def place_axis(self, d, r):
+        """The wall on side d of this cell is r m from the robot centre (gimbal
+        ToF): put the pose there on that axis (start-of-round calibration)."""
+        c = self.cell()
+        x, y, _ = self.pose()
+        s = SIGN[d]
+        if d in "NS":
+            self.off_n += c[1] * T + s * (T / 2 - r) - y
+        else:
+            self.off_e += c[0] * T + s * (T / 2 - r) - x
+
     def _trace(self):
         t = self.hal.now()
         if t - self._last_trace >= 0.1:
